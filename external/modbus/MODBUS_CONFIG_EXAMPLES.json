@@ -1,0 +1,149 @@
+{
+  "modbus_examples": {
+    "description": "Modbus节点配置示例和最佳实践",
+    
+    "example_1_basic_read": {
+      "description": "基本读取线圈状态 - 固定地址配置",
+      "config": {
+        "server": "tcp://192.168.2.146:502",
+        "cmd": "ReadCoils",
+        "unitId": 2,
+        "address": "2",
+        "quantity": "2",
+        "regType": "0",
+        "tcpConfig": {
+          "timeout": 10
+        },
+        "encodingConfig": {
+          "endianness": 1,
+          "wordOrder": 1
+        }
+      },
+      "notes": "适用于地址固定的场景,避免使用模板变量"
+    },
+    
+    "example_2_template_address": {
+      "description": "使用模板变量的动态地址配置",
+      "config": {
+        "server": "tcp://192.168.2.146:502",
+        "cmd": "ReadCoils",
+        "unitId": 2,
+        "address": "${metadata.coilAddress}",
+        "quantity": "${metadata.coilQuantity}",
+        "regType": "0",
+        "tcpConfig": {
+          "timeout": 10
+        }
+      },
+      "notes": "需要在规则链上游节点的元数据中设置 coilAddress 和 coilQuantity",
+      "required_metadata": {
+        "coilAddress": "2",
+        "coilQuantity": "2"
+      }
+    },
+    
+    "example_3_write_coil": {
+      "description": "写入单个线圈状态",
+      "config": {
+        "server": "tcp://192.168.2.146:502",
+        "cmd": "WriteCoil",
+        "unitId": 2,
+        "address": "2",
+        "value": "true",
+        "tcpConfig": {
+          "timeout": 10
+        }
+      },
+      "notes": "写操作必须提供 value 参数,支持: true/false, 1/0"
+    },
+    
+    "example_4_rtu_serial": {
+      "description": "RTU串口连接配置",
+      "config": {
+        "server": "rtu:///dev/ttyUSB0",
+        "cmd": "ReadCoils",
+        "unitId": 2,
+        "address": "2",
+        "quantity": "2",
+        "rtuConfig": {
+          "speed": 19200,
+          "dataBits": 8,
+          "parity": 0,
+          "stopBits": 2
+        },
+        "tcpConfig": {
+          "timeout": 10
+        },
+        "encodingConfig": {
+          "endianness": 1,
+          "wordOrder": 1
+        }
+      },
+      "notes": "RTU模式需要配置串口参数,超时时间应适当增加"
+    },
+    
+    "example_5_read_registers": {
+      "description": "读取保持寄存器",
+      "config": {
+        "server": "tcp://192.168.2.146:502",
+        "cmd": "ReadRegisters",
+        "unitId": 2,
+        "address": "100",
+        "quantity": "10",
+        "regType": "0",
+        "tcpConfig": {
+          "timeout": 10
+        }
+      },
+      "notes": "regType: 0=保持寄存器(功能码0x3), 1=输入寄存器(功能码0x4)"
+    },
+    
+    "troubleshooting_tips": {
+      "issue_1_address_zero": {
+        "problem": "modbus address cannot be 0 or empty, template result: 0",
+        "cause": "模板变量未找到对应的元数据值,返回空字符串或0",
+        "solution": [
+          "检查配置中的 address 是否使用了 ${...} 模板语法",
+          "如果使用模板,确保上游节点在 metadata 中提供了对应变量",
+          "如果地址固定,直接使用数字如 \"address\": \"2\"",
+          "查看日志中的 Warning 信息了解模板执行结果"
+        ]
+      },
+      
+      "issue_2_timeout": {
+        "problem": "Modbus ReadCoils error: request timed out",
+        "cause": "设备响应慢或网络延迟,默认5秒超时不足",
+        "solution": [
+          "增加 tcpConfig.timeout 值,建议10-30秒",
+          "检查网络连接稳定性",
+          "确认 Modbus 设备在线且正常工作",
+          "对于RTU低速串口,需要更长的超时时间"
+        ]
+      },
+      
+      "issue_3_reconnect": {
+        "problem": "use of closed network connection",
+        "cause": "频繁重连导致连接被关闭",
+        "solution": [
+          "代码已优化:增加重连等待时间到200ms",
+          "检查网络设备(交换机、网关)的会话超时设置",
+          "避免过多并发请求同时触发重连",
+          "考虑使用连接池共享连接"
+        ]
+      },
+      
+      "debug_logging": {
+        "description": "启用详细日志进行调试",
+        "log_messages": [
+          "Initializing Modbus connection to {server} with timeout={timeout}s, unitId={unitId}",
+          "Modbus connection established successfully to {server}",
+          "Starting Modbus reconnection process...",
+          "Closing old Modbus connection...",
+          "Modbus reconnection successful",
+          "Warning: Modbus address template result is empty, using default value 0"
+        ],
+        "notes": "关注这些日志消息可以快速定位问题"
+      }
+    }
+  }
+}

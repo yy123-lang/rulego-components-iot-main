@@ -797,18 +797,32 @@ func (x *ModbusNode) reconnect(oldClient *modbus.ModbusClient) (*modbus.ModbusCl
 		return nil, err
 	}
 	if currentClient != oldClient {
+		// 已经被其他协程重建，直接返回新连接
+		x.Printf("Connection already reconnected by another goroutine, reusing existing connection")
 		return currentClient, nil
 	}
 
+	x.Printf("Starting Modbus reconnection process...")
+
 	// 新增：主动关闭旧连接并等待网关释放资源
 	if oldClient != nil {
+		x.Printf("Closing old Modbus connection...")
 		oldClient.Close()
-		// 等待网关完成会话清理（根据实际情况调整延时）
-		time.Sleep(100 * time.Millisecond)
+		// 等待网关完成会话清理（增加到200ms以确保可靠性）
+		time.Sleep(200 * time.Millisecond)
+		x.Printf("Old connection closed, waiting for gateway session cleanup completed")
 	}
 
 	_ = x.SharedNode.Close()
-	return x.SharedNode.GetSafely()
+	x.Printf("Reconnecting to Modbus server...")
+	newClient, err := x.SharedNode.GetSafely()
+	if err != nil {
+		x.Printf("Failed to reconnect: %v", err)
+		return nil, err
+	}
+	
+	x.Printf("Modbus reconnection successful")
+	return newClient, nil
 }
 
 // OnMsg 处理消息
@@ -1075,32 +1089,47 @@ func (x *ModbusNode) getParams(ctx types.RuleContext, msg types.RuleMsg) (*Param
 		params                   = Params{}
 	)
 	evn := base.NodeUtils.GetEvnAndMetadata(ctx, msg)
+	
 	// 获取address
-	if strings.TrimSpace(x.addressTemplate.Execute(evn)) != "" {
-		tmp, err = strconv.ParseUint(x.addressTemplate.Execute(evn), 0, 64)
+	addressStr := x.addressTemplate.Execute(evn)
+	if strings.TrimSpace(addressStr) != "" {
+		tmp, err = strconv.ParseUint(addressStr, 0, 64)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to parse address '%s': %w", addressStr, err)
 		}
 		address = uint16(tmp)
+	} else {
+		x.Printf("Warning: Modbus address template result is empty, using default value 0. Template: %s", x.Config.Address)
 	}
+	
 	// 获取quantity
-	if strings.TrimSpace(x.quantityTemplate.Execute(evn)) != "" {
-		tmp, err = strconv.ParseUint(x.quantityTemplate.Execute(evn), 0, 64)
+	quantityStr := x.quantityTemplate.Execute(evn)
+	if strings.TrimSpace(quantityStr) != "" {
+		tmp, err = strconv.ParseUint(quantityStr, 0, 64)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to parse quantity '%s': %w", quantityStr, err)
 		}
 		quanitity = uint16(tmp)
+	} else {
+		// 对于读取操作,如果数量为0,设置默认值为1
+		if !strings.HasPrefix(x.Config.Cmd, "Write") {
+			quanitity = 1
+			x.Printf("Warning: Modbus quantity template result is empty, using default value 1. Template: %s", x.Config.Quantity)
+		}
 	}
 
 	// 获取regType
-	if strings.TrimSpace(x.regTypeTemplate.Execute(evn)) != "" {
-		tmp, err = strconv.ParseUint(x.regTypeTemplate.Execute(evn), 0, 64)
+	regTypeStr := x.regTypeTemplate.Execute(evn)
+	if strings.TrimSpace(regTypeStr) != "" {
+		tmp, err = strconv.ParseUint(regTypeStr, 0, 64)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to parse regType '%s': %w", regTypeStr, err)
 		}
 		regType = modbus.RegType(tmp)
 	}
+	
 	val = x.valueTemplate.Execute(evn)
+	
 	// 更新参数
 	params.Cmd = x.Config.Cmd
 	params.Address = address
@@ -1108,10 +1137,12 @@ func (x *ModbusNode) getParams(ctx types.RuleContext, msg types.RuleMsg) (*Param
 	params.Value = val
 	params.RegType = regType
 
-	// 校验必要参数
-	if address == 0 {
-		return nil, fmt.Errorf("modbus address cannot be 0 or empty, template result: %s", x.addressTemplate.Execute(evn))
+	// 校验必要参数 - 移除 address == 0 的校验,因为某些场景下地址0是合法的
+	// 仅检查是否显式提供了地址配置
+	if x.Config.Address == "" && address == 0 {
+		return nil, fmt.Errorf("modbus address is not configured and template result is empty")
 	}
+	
 	// 写操作需要 value 参数
 	if strings.HasPrefix(params.Cmd, "Write") && strings.TrimSpace(val) == "" {
 		return nil, fmt.Errorf("modbus value cannot be empty for write command: %s", params.Cmd)
@@ -1142,6 +1173,10 @@ func (x *ModbusNode) initClient() (*modbus.ModbusClient, error) {
 		Timeout:  time.Duration(x.Config.TcpConfig.Timeout) * time.Second,
 		Parity:   x.Config.RtuConfig.Parity,
 	}
+	
+	x.Printf("Initializing Modbus connection to %s with timeout=%ds, unitId=%d", 
+		x.Config.Server, x.Config.TcpConfig.Timeout, x.Config.UnitId)
+	
 	// handle TLS options
 	if strings.HasPrefix(x.Config.Server, "tcp+tls://") {
 		clientKeyPair, err := tls.LoadX509KeyPair(x.Config.TcpConfig.CertPath, x.Config.TcpConfig.KeyPath)
@@ -1160,12 +1195,19 @@ func (x *ModbusNode) initClient() (*modbus.ModbusClient, error) {
 
 	conn, err := modbus.NewClient(config)
 	if err != nil {
+		x.Printf("Failed to create Modbus client: %v", err)
 		return nil, err
 	}
 	conn.SetEncoding(modbus.Endianness(x.Config.EncodingConfig.Endianness), modbus.WordOrder(x.Config.EncodingConfig.WordOrder))
 	conn.SetUnitId(x.Config.UnitId)
 
 	err = conn.Open()
+	if err != nil {
+		x.Printf("Failed to open Modbus connection: %v", err)
+		return nil, err
+	}
+	
+	x.Printf("Modbus connection established successfully to %s", x.Config.Server)
 	return conn, err
 }
 
